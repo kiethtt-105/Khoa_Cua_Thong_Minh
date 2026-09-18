@@ -1,0 +1,7 @@
+MFRC522
+Keypad
+Adafruit GFX Library
+Adafruit SSD1306
+ESP32Servo
+PubSubClient
+ArduinoJson

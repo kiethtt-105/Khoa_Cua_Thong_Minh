@@ -1,0 +1,15 @@
+# Dùng khi KHÔNG muốn phụ thuộc broker công khai test.mosquitto.org nữa.
+# Chạy:  docker compose up -d
+# Sau đó đổi MQTT_HOST=localhost trong backend/.env (và trong firmware nếu build
+# cho ESP32 thật trên cùng mạng LAN; Wokwi mô phỏng không với tới localhost của
+# máy bạn nên giai đoạn Wokwi vẫn nên dùng test.mosquitto.org).
+version: "3.8"
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
