@@ -1,0 +1,257 @@
+PHAN TICH CHUYEN SAU NGHIEP VU - HE THONG SMARTLOCK
+
+
+--------------------------------------------------------------------
+1. DANG KY TAI KHOAN
+--------------------------------------------------------------------
+Input nguoi dung: email, username, mat khau, ho ten.
+
+Buoc xu ly:
+  1. Validate: email dung dinh dang, username hop le (do dai, ky tu cho
+     phep), mat khau du manh.
+  2. Goi User.objects.create_user(email, username, password, ...):
+     - UserManager.create_user() chuan hoa email (lowercase), chuan hoa
+       username (lowercase), hash mat khau (set_password), goi
+       full_clean() -> User.clean() se kiem tra CHEO: username khong
+       duoc trung voi email cua nguoi khac va nguoc lai.
+     - Neu trung -> ValidationError -> tra loi 400 "Username/email da
+       duoc su dung".
+     - Neu OK -> INSERT vao bang "smartlock_user" (is_active=False,
+       email_verified=False).
+     - Signal post_save(User) tu dong INSERT 2 dong vao LoginIdentifier
+       (kind=EMAIL, kind=USERNAME). Neu do dong thoi 2 user submit trung
+       gia tri -> UniqueConstraint tren LoginIdentifier.value chan o
+       muc DB (bao loi IntegrityError -> serializer bat va tra 400).
+  3. Tao EmailVerificationToken (purpose=EMAIL_VERIFY):
+     - Sinh token ngau nhien (vi du secrets.token_urlsafe(32)).
+     - Luu token_hash = sha256(token) vao DB, KHONG luu token goc.
+     - expires_at = now + SystemSettings.verification_token_expiry_minutes.
+     - Gui email chua link: https://.../verify?token=<token_goc>&uid=<user_id>
+  4. Ket qua tra ve nguoi dung: 201 Created, "Vui long kiem tra email de
+     xac minh tai khoan."
+
+Loi co the gap:
+  - 400: email/username da ton tai (unique tren User hoac LoginIdentifier).
+  - 400: mat khau khong du manh (AUTH_PASSWORD_VALIDATORS).
+  - 403: SystemSettings.registration_enabled = False -> tu choi dang ky.
+
+--------------------------------------------------------------------
+2. XAC MINH EMAIL (bam link trong mail)
+--------------------------------------------------------------------
+Input: token (tu URL), user_id.
+
+Buoc xu ly:
+  1. Tim EmailVerificationToken theo user_id + purpose=EMAIL_VERIFY +
+     is_used=False + expires_at > now.
+  2. So sanh sha256(token) voi token_hash trong DB.
+  3. Neu khop:
+     - UPDATE User: email_verified=True, is_active=True.
+     - UPDATE EmailVerificationToken: is_used=True, used_at=now.
+     - Ghi AuditLog (action='EMAIL_VERIFIED', actor_user=user).
+  4. Ket qua: 200 OK, chuyen huong ve trang dang nhap.
+
+Loi:
+  - 400: token sai / da dung (is_used=True) / het han (expires_at < now)
+    -> tra ve "Link xac minh khong hop le hoac da het han", goi y gui lai.
+  - 404: khong tim thay user_id.
+
+--------------------------------------------------------------------
+3. DANG NHAP (email HOAC username)
+--------------------------------------------------------------------
+Input: identifier (email hoac username, nguoi dung go nguyen van), password.
+
+Buoc xu ly:
+  1. Kiem tra LoginLockout cua user tuong ung (neu tim duoc user theo
+     identifier): neu locked_until > now -> TU CHOI NGAY, khong check
+     password (tranh brute-force khi dang bi khoa), tra 423 Locked kem
+     so phut con lai.
+  2. Tra cuu User: thu WHERE email=identifier truoc, khong co thi thu
+     WHERE username=identifier (o tang authentication backend, khong
+     phai trong models.py). Vi email/username la duy nhat toan he thong
+     (nho LoginIdentifier) nen ket qua luon ro rang, khong bao gio ra
+     2 user cho 1 identifier.
+  3. Ghi LoginAttemptLog (identifier, ip_address, user_agent, success=?).
+  4a. Neu SAI mat khau hoac khong tim thay user:
+      - Neu tim duoc user: UPDATE/CREATE LoginLockout cho user do:
+          failed_attempts += 1
+          Neu failed_attempts vuot nguong cho phep o stage hien tai ->
+          stage += 1, locked_until = now + stage_minutes[stage]
+          (stage_minutes lay tu SystemSettings.login_lockout_stage_minutes,
+           mac dinh [5, 10, 30]; tu stage 3 tro di giu nguyen 30 phut).
+          Neu vua chuyen sang stage moi:
+            - Gui email canh bao dang nhap sai nhieu lan (dung
+              EmailVerificationToken? KHONG - day chi la email thong bao,
+              khong can token, gui thang qua EMAIL_BACKEND).
+            - Tao Notification (user=user, type='SECURITY_LOCKOUT',
+              severity='warning', title='Canh bao dang nhap',
+              message='Tai khoan bi khoa X phut do dang nhap sai nhieu
+              lan') -> frontend web/app poll/subscribe bang nay de hien
+              push/toast canh bao.
+            - warning_sent_at = now.
+      - Tra 401 "Sai email/username hoac mat khau".
+  4b. Neu DUNG mat khau:
+      - Neu User.is_active=False (chua verify email) -> 403 "Vui long
+        xac minh email truoc khi dang nhap".
+      - RESET LoginLockout ve stage=0, failed_attempts=0, locked_until=NULL.
+      - Tao session/JWT, tra 200 kem thong tin user.
+
+Loi:
+  - 423 Locked: dang trong thoi gian khoa (tra kem so giay/phut con lai).
+  - 401: sai thong tin dang nhap.
+  - 403: tai khoan chua active/chua verify email.
+
+Cac bang lien quan: User, LoginIdentifier (tra cuu), LoginLockout (trang
+thai khoa), LoginAttemptLog (audit + tinh brute-force theo IP),
+Notification (canh bao), AuditLog (log hanh vi bao mat cap he thong).
+
+--------------------------------------------------------------------
+4. QUEN MAT KHAU
+--------------------------------------------------------------------
+  1. User nhap email -> tao EmailVerificationToken (purpose=PASSWORD_RESET),
+     gui link qua mail (giong muc 2).
+  2. User bam link, nhap mat khau moi -> BE verify token (giong buoc 2),
+     neu hop le: set_password(mat_khau_moi), is_used=True cho token,
+     RESET LoginLockout ve 0 (phong truong hop dang bi khoa do doan
+     truoc quen mat khau roi thu sai lien tuc), ghi AuditLog.
+  3. Ket qua: 200, yeu cau dang nhap lai.
+
+Loi: token sai/het han -> 400. Email khong ton tai -> VAN tra ve 200
+chung chung ("Neu email ton tai, ban se nhan duoc huong dan") de tranh
+lo thong tin user nao ton tai trong he thong (chong do tim tai khoan).
+
+--------------------------------------------------------------------
+5. THEM KHOA (THIET BI) VAO HE THONG
+--------------------------------------------------------------------
+KHONG dung OTP. Dung co che "ma vat ly cua thiet bi" co san trong Device.
+
+Buoc xu ly (nguoi dung la chu so huu moi cua khoa):
+  1. Thiet bi khi xuat xuong da duoc set san: device_code (in/dan tren vo
+     may hoac hien tren man hinh thiet bi khi vao che do provisioning) +
+     provisioning_secret (chuoi bi mat rieng cua thiet bi, chi luu HASH
+     trong DB o field provisioning_secret_hash, thiet bi tu giu ban goc
+     trong firmware/EEPROM).
+  2. App: nguoi dung quet QR hoac nhap tay device_code + provisioning_secret
+     in kem thiet bi.
+  3. BE: SELECT Device WHERE device_code=... AND status='provisioning'.
+     - Khong tim thay -> 404 "Ma thiet bi khong ton tai hoac da duoc su
+       dung".
+     - Tim thay -> so sanh hash(secret_nhap_vao) voi provisioning_secret_hash.
+       Sai -> 401 "Ma xac thuc thiet bi khong dung" (co the gioi han so
+       lan thu qua LoginAttemptLog-style logic rieng neu can, nhung
+       thuong gioi han o tang thiet bi/firmware roi vi day la 1 lan
+       provisioning, khong phai dang nhap lap lai).
+  4. Neu dung: UPDATE Device SET owner=user, status='online' (hoac
+     'offline' cho toi khi thiet bi that su ket noi MQTT lan dau),
+     updated_at=now (qua signal pre_save co san).
+     Rang buoc CheckConstraint 'chk_devices_owner_vs_status' dam bao
+     KHONG THE co Device status != provisioning ma owner rong, va
+     nguoc lai -> tranh du lieu ma khong chu.
+  5. Ghi AuditLog (action='DEVICE_CLAIMED', actor_user, device).
+     Tao Notification chao mung + huong dan ket noi WiFi/Bluetooth.
+  6. Ket qua: 200, tra ve thong tin Device vua duoc gan owner.
+
+Loi: 404 sai ma, 401 sai secret, 409 thiet bi da co chu (status khong
+con la 'provisioning' - da bi nguoi khac them truoc).
+
+--------------------------------------------------------------------
+6. CHIA SE QUYEN DUNG KHOA (SHARE ACCESS CODE - 6 SO)
+--------------------------------------------------------------------
+Nguoi tao (chu khoa hoac nguoi co quyen "share"):
+  1. Chon Device + danh sach Permission muon cap (vi du: UNLOCK, VIEW_LOG).
+  2. BE sinh ngau nhien ma 6 chu so (vi du: secrets.randbelow(900000)+100000).
+  3. Tao ShareAccessCode: device, created_by, permissions (M2M),
+     expires_at = now + SystemSettings.share_code_expiry_minutes,
+     goi instance.set_code(ma_6_so) -> ma_hoa_bang_Fernet -> luu vao
+     code_encrypted. KHONG luu plaintext o bat ky dau (khong log ra
+     console/AuditLog.metadata).
+  4. Tra ma 6 so ve cho nguoi tao (hien tren app 1 lan) de ho gui thu
+     cong (nhan tin, doc mieng...) cho nguoi duoc chia se - KHONG gui
+     qua he thong email/SMS cua app (giam be mat tan cong so voi OTP).
+  5. Ket qua: 201, tra ve ma 6 so (chi lan nay) + thoi han het han.
+
+Nguoi nhan nhap ma de kich hoat:
+  1. Nhap device_code (hoac quet QR/link co san device_id) + ma 6 so.
+  2. BE: SELECT ShareAccessCode WHERE device=... AND expires_at > now.
+     Voi tung ban ghi con hieu luc cua thiet bi do, goi check_code(ma_nhap)
+     (giai ma Fernet roi so sanh) cho toi khi khop hoac het danh sach.
+     - Khong khop ban nao / khong con ban nao (het han/da bi xoa vi da
+       dung) -> 400 "Ma khong hop le hoac da het han".
+  3. Neu khop:
+     - Tao DeviceAccess: device, user=nguoi_nhan, permissions=copy tu
+       ShareAccessCode.permissions, source='SHARE_CODE', accepted=True,
+       created_by=nguoi_tao_ma, is_active=True.
+     - XOA NGAY ban ghi ShareAccessCode vua dung (DELETE, dung 1 lan).
+     - Ghi AuditLog (action='SHARE_CODE_REDEEMED').
+     - Tao Notification cho ca 2 ben (nguoi tao ma: "X da nhan quyen
+       dung khoa"; nguoi nhan: "Ban da duoc cap quyen dung khoa Y").
+  4. Ket qua: 200, tra ve DeviceAccess vua tao.
+
+Don dep dinh ky (khong bat buoc nhung khuyen nghi): 1 scheduled job
+(vi du Celery beat / cron) DELETE ShareAccessCode WHERE expires_at < now
+- vi ma het han van con nam trong DB (o dang ma hoa) cho toi khi bi xoa
+thu cong hoac bi job nay don.
+
+Loi: 400 sai ma/het han, 404 device khong ton tai, 403 nguoi tao khong
+co quyen "share" tren device do (kiem tra qua DeviceAccess/owner cua
+nguoi tao truoc khi cho tao ShareAccessCode).
+
+--------------------------------------------------------------------
+7. DUNG THE NFC DE MO KHOA (TAP-TO-UNLOCK)
+--------------------------------------------------------------------
+Luong nay khong qua app - xay ra ngay tai thiet bi:
+
+  1. Nguoi dung ap the NFC vao dau doc gan tren khoa. Firmware doc UID
+     vat ly cua the.
+  2. Thiet bi (hoac gateway) tinh hash(UID) va goi len BE qua API/MQTT
+     kem reader_id, device_id.
+  3. BE: SELECT NfcReader WHERE id=reader_id AND device_id=device_id.
+     Khong ton tai/da disable -> ghi NfcLog(event_type='TAP_FAILED',
+     success=False), tra loi tu choi mo khoa.
+  4. SELECT AccessCard WHERE card_uid_hash=hash(UID) AND is_active=True.
+     - Khong tim thay the -> NfcLog TAP_FAILED (nfc_tag=None) -> tu choi.
+     - Tim thay -> kiem tra CardDeviceAccess WHERE access_card=the AND
+       device=device_id AND is_active=True.
+       - Khong co quyen tren device nay -> NfcLog TAP_FAILED
+         (nfc_tag=the, user=chu_the) -> tu choi, co the tao Notification
+         canh bao cho chu device neu muon (the la vay nhung khong co quyen
+         tren khoa nay - dau hieu bat thuong).
+       - Co quyen -> tao NfcSession (reader, nfc_tag, device, user,
+         session_token, success=True) -> gui DeviceCommand (command_type=
+         'UNLOCK', issued_by=user, device) xuong thiet bi qua MQTT ->
+         ghi NfcLog(event_type='TAP_SUCCESS', success=True) -> ghi
+         DeviceStatusLog khi thiet bi bao cap nhat lock_state='unlocked'.
+  5. Ket qua tra ve thiet bi: lenh mo khoa (rung/den bao xanh). Ket qua
+     tren app (neu online): push Notification "Cua vua duoc mo bang the
+     NFC luc HH:MM boi <ten user>".
+
+Dang ky the moi (truoc khi dung duoc buoc tren):
+  1. Chu khoa (hoac nguoi co quyen ADD_CARD) ap the trong che do
+     "dang ky the" tren app/thiet bi.
+  2. BE tao AccessCard (card_uid_hash=hash(UID), user=nguoi_so_huu_the).
+  3. Tao CardDeviceAccess (access_card, device) de gan the vao (cac)
+     khoa cu the - UniqueConstraint 'uniq_card_device' chan dang ky
+     trung 1 the cho cung 1 device 2 lan.
+  4. Ghi NfcLog(event_type='CARD_REGISTER'), AuditLog.
+
+Loi thuong gap: 400 the da dang ky (unique card_uid_hash), 409 the da
+gan cho device nay roi (uniq_card_device), 403 nguoi thao tac khong co
+quyen ADD_CARD tren device.
+
+--------------------------------------------------------------------
+8. GHI CHU CHUNG VE BAO MAT
+--------------------------------------------------------------------
+- Tat ca "*_hash" (password, provisioning_secret, pin, card_uid, token,
+  command_token, authorization_code, recovery_code) dung thuat toan bam
+  1 chieu (vi du Argon2/bcrypt qua Django's password hasher hoac
+  hashlib.sha256 cho token dai ngau nhien) - KHONG the giai nguoc.
+- ShareAccessCode.code_encrypted la TRUONG HOP DUY NHAT dung ma hoa
+  2 chieu (Fernet) thay vi hash, vi nghiep vu bat buoc phai so sanh
+  ma 6 so ngan (de bi brute-force neu chi hash + so sanh tuan tu ma
+  khong gioi han so lan/thoi gian) - da bu lai bang: doi song cuc ngan
+  (mac dinh 15 phut), xoa ngay sau khi dung, va nen gioi han so lan
+  thu redeem sai trong tang view (vi du qua cache/rate-limit theo
+  device_id+ip, tuong tu logic LoginLockout).
+- Khong con "2FA" trong toan bo he thong: 1 yeu to duy nhat de dang nhap
+  la mat khau; rui ro do doi trong su ket hop: khoa dang nhap tang dan +
+  email/token xac minh cho cac hanh dong nhay cam (doi mat khau, doi
+  thong tin, thao tac ho tro) + audit log day du.

@@ -1,0 +1,111 @@
+PHAN TICH HE THONG SMARTLOCK (models.py) - SAU KHI GO BO 2FA
+================================================================
+
+1. TONG QUAN
+----------------
+Day la mo hinh du lieu cho he thong khoa cua thong minh (IoT smart lock),
+gom 5 nhom chinh, dung Django ORM + Postgres (Supabase). Auth dung custom
+User model (UUID pk, dang nhap bang email), ma hoa Fernet cho du lieu nhay cam.
+
+2. NHOM MODEL
+----------------
+NHOM A - NGUOI DUNG & XAC THUC
+  - User: custom user (AbstractBaseUser + PermissionsMixin), email lam
+    USERNAME_FIELD, co is_active/email_verified rieng.
+  - EmailOtpChallenge: OTP qua email, con lai 5 muc dich:
+    EMAIL_VERIFY, SUPPORT_AUTH, PASSWORD_RESET, RECOVERY_CONFIRM, UPDATE_INFO.
+    (Da bo purpose LOGIN_2FA - xem muc 3)
+  - PendingRegistration: luu tam thong tin dang ky cho toi khi xac thuc OTP.
+  - LoginOtpAttempt: rate-limit so lan gui OTP / reset password theo IP.
+  - SystemSettings: cau hinh he thong (bat/tat dang ky, thoi han OTP, whitelist IP...).
+  - Announcement: thong bao he thong cho toan bo user.
+
+NHOM B - THIET BI
+  - Device: khoa vat ly/simulated, gan owner, trang thai online/offline/maintenance.
+  - DeviceStatusLog: log pin, tin hieu, trang thai khoa, canh bao tamper.
+  - DeviceCommand: lenh gui xuong thiet bi (UNLOCK/LOCK/ADD_CARD/OTA...), co token hash.
+
+NHOM C - QUYEN & CHIA SE
+  - Permission: danh muc quyen (co co nhay cam is_sensitive).
+  - DeviceAccess: chia se quyen truy cap thiet bi cho user khac, co han su dung.
+  - AccessCard: the NFC gan voi user.
+  - CardDeviceAccess: the nao dung duoc voi thiet bi nao.
+  - DoorPinCode: ma PIN mo cua, ho tro dung 1 lan.
+
+NHOM D - NFC READER
+  - NfcReader / NfcReaderConfig: dau doc NFC va cau hinh tu dong.
+  - NfcSession: phien quet the.
+  - NfcLog: log su kien quet the (thanh cong/that bai/mat ket noi...).
+
+NHOM E - HO TRO & NHAT KY
+  - SupportRequest: yeu cau ho tro dac biet (reset remote, recovery, doi chu so
+    huu...), bat buoc co recovery_code_hash voi cac hanh dong nhay cam.
+  - Notification: thong bao rieng cho tung user.
+  - AuditLog: nhat ky hanh dong toan he thong.
+
+3. GO BO TINH NANG 2FA - DA THUC HIEN
+----------------------------------------
+2FA (xac thuc 2 buoc khi dang nhap) truoc day duoc cai bang 4 thanh phan.
+Da xoa toan bo khoi models.py:
+
+  a) EmailOtpChallenge.purpose = 'LOGIN_2FA'
+     -> XOA choice nay. Cac purpose con lai (verify email, reset password,
+        support auth...) khong phai 2FA nen giu nguyen.
+
+  b) Model AccountBackupCode (ma du phong khoi phuc 2FA) -> XOA CA MODEL.
+
+  c) Model TrustedLoginDevice ("thiet bi tin cay" de bo qua buoc OTP lan
+     dang nhap sau) -> XOA CA MODEL. Model nay chi co y nghia khi co 2FA.
+
+  d) Model RemoteAuthRequest (duyet dang nhap tu thiet bi khac - kieu push
+     approval) -> XOA CA MODEL.
+
+  Sau khi xoa: 3 class + 1 choice, tong 443 dong con lai (tu 478 dong).
+  Khong con model/field nao tham chieu toi 3 class da xoa (da grep kiem tra).
+
+  LUU Y: sau khi sua models.py, PHAI chay lai:
+     python manage.py makemigrations smartlock
+     (Django se tu tao migration DROP 3 bang tren + ALTER choices field)
+
+4. NGUYEN NHAN LOI "relation smartlock_user does not exist"
+----------------------------------------------------------------
+Log lenh migrate cho thay:
+   "Operations to perform: Apply all migrations: admin, auth, contenttypes, sessions"
+   -> KHONG CO "smartlock" TRONG DANH SACH NAY.
+
+Trong khi AUTH_USER_MODEL = 'smartlock.User', nen migration admin.0001_initial
+can bang smartlock_user ton tai truoc (FK swappable dependency). Django bao
+"Apply all migrations" khong liet ke smartlock nghia la Django nghi migration
+cua app smartlock DA duoc apply roi (co dong trong bang django_migrations),
+nhung bang smartlock_user THUC TE khong ton tai trong database Supabase nay.
+
+=> Ket luan: bang django_migrations dang co du lieu "rac" (stale) - ghi nhan
+   sai la smartlock da migrate xong, trong khi DB that (Supabase) chua tung
+   co bang nay (co the do: migrate tung chay nham vao DB/schema khac, hoac
+   bang bi xoa thu cong tren Supabase dashboard nhung khong xoa dong tuong
+   ung trong django_migrations).
+
+5. CACH SUA LOI MIGRATE (chon 1 trong 2, tuy con du lieu can giu khong)
+----------------------------------------------------------------------------
+CACH A - Neu DB con moi / chua co du lieu that (khuyen nghi cho de tai):
+  1. Vao Supabase SQL editor, chay:
+       DROP SCHEMA public CASCADE;
+       CREATE SCHEMA public;
+  2. Chay lai tu dau:
+       python manage.py makemigrations
+       python manage.py migrate
+
+CACH B - Neu muon giu du lieu cac app khac, chi reset rieng smartlock:
+  1. Vao Supabase SQL editor, chay:
+       DELETE FROM django_migrations WHERE app = 'smartlock';
+  2. Kiem tra xem bang smartlock_user (va cac bang smartlock_* khac) co
+     thuc su ton tai khong:
+       SELECT table_name FROM information_schema.tables
+       WHERE table_name LIKE 'smartlock_%';
+     - Neu KHONG co bang nao -> chay: python manage.py migrate smartlock
+     - Neu CO bang roi (chi la django_migrations bi mat dong ghi nhan)
+       -> chay: python manage.py migrate smartlock --fake-initial
+  3. Sau do chay tiep: python manage.py migrate
+
+Sau khi 2 buoc tren xong, nho makemigrations lai truoc do (muc 3) de
+migration phan anh dung models.py da bo 2FA, roi moi migrate.

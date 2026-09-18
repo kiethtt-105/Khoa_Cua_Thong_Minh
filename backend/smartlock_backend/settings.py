@@ -33,7 +33,14 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',   
     'smartlock',
+    'allauth',
+    'allauth.account',
+
 ]
+
+# Custom user model
+AUTH_USER_MODEL = 'smartlock.User'
+
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -43,13 +50,14 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'allauth.account.middleware.AccountMiddleware'
 ]
 
 
 ROOT_URLCONF = 'smartlock_backend.urls'
 
 # Custom user model 
-AUTH_USER_MODEL = 'smartlock.User'
+#AUTH_USER_MODEL = 'smartlock.User'
 
 WSGI_APPLICATION = "smartlock_backend.wsgi.application"
 ASGI_APPLICATION = "smartlock_backend.asgi.application"

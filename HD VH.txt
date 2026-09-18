@@ -1,0 +1,5 @@
+1. Thêm Khóa Vào DTB để quản lí
+
+2. ACTIVE THẺ
+- ADMIN THÊM (ĐẦU ĐỌC TỔNG ) - HOẶC THỦ CÔNG
+- CHỦ KHÓA GỬI YÊU CẦU ĐẾN ADMIN ĐỂ THÊM THẺ (FLOW NÀY SAU KHI APPROVED -> THẺ ĐC ACTIVE + CẤP QUYỀN VÀO KHÓA ĐÃ REQUEST YÊU CẦU ACTIVE
