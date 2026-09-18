@@ -1,0 +1,12 @@
+{% load static %}
+
+{% extends 'account/base/dashboard.html' %}
+{% block content %}
+<div class="container">
+    <h4>Cài đặt hệ thống</h4>
+    <form method="post">
+        {% csrf_token %}
+        <!-- Form tất cả SystemSettings -->
+    </form>
+</div>
+{% endblock %}
